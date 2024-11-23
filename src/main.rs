@@ -1,7 +1,6 @@
 use std::env;
 use std::io;
 use std::io::Write;
-use std::process;
 use std::process::Command;
 use std::process::Stdio;
 
@@ -31,7 +30,8 @@ fn main() {
             continue;
         }
         let mut commands = input.trim().split('|').peekable();
-        let mut last_child = None;
+        let mut pipe = Stdio::inherit();
+        let mut childs = Vec::new();
 
         while let Some(command) = commands.next() {
             let mut parts = command.split_whitespace();
@@ -43,16 +43,16 @@ fn main() {
                     break;
                 }
             }
-            let mut args = parts.peekable();
+            let mut args = parts;
 
             match program {
                 "exit" => {
                     return;
                 }
                 "cd" => {
-                    last_child = None;
+                    pipe = Stdio::null();
                     let path = String::from(args.next().unwrap_or("~")).replace("~", &path_home);
-                    if args.peek().is_some() {
+                    if args.next().is_some() {
                         eprintln!("cd: too many arguments");
                         continue;
                     }
@@ -61,9 +61,7 @@ fn main() {
                     }
                 }
                 program => {
-                    let cfg_in = last_child.map_or(Stdio::inherit(), |child: process::Child| {
-                        Stdio::from(child.stdout.unwrap())
-                    });
+                    let cfg_in = pipe;
                     let cfg_out = if commands.peek().is_some() {
                         Stdio::piped()
                     } else {
@@ -76,19 +74,28 @@ fn main() {
                         .spawn();
 
                     match child {
-                        Ok(child) => {
-                            last_child = Some(child);
+                        Ok(mut child) => {
+                            match child.stdout.take() {
+                                Some(stdout) => {
+                                    pipe = Stdio::from(stdout);
+                                }
+                                None => {
+                                    pipe = Stdio::null();
+                                }
+                            }
+                            childs.push(child);
                         }
                         Err(err) => {
-                            last_child = None;
+                            pipe = Stdio::null();
                             eprintln!("{}: {}", program, err);
                         }
                     }
                 }
             }
         }
-        if let Some(mut child) = last_child {
-            child.wait().unwrap();
+
+        for mut child in childs {
+            let _ = child.wait();
         }
     }
 }
