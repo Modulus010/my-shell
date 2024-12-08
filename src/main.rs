@@ -4,32 +4,50 @@ use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 
+fn get_env_var(var_name: &str, fallback: Option<&str>) -> String {
+    env::var(var_name).unwrap_or_else(|_| {
+        fallback
+            .and_then(|f| env::var(f).ok())
+            .expect(&format!("no {} or fallback env var", var_name))
+    })
+}
+
+fn get_current_dir() -> String {
+    let current_dir = env::current_dir().unwrap();
+    match current_dir.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => current_dir.to_string_lossy().into_owned(),
+    }
+}
+
+fn handle_cd<'a>(args: &mut impl Iterator<Item = &'a str>, home_path: &str) -> Result<(), String> {
+    let path = args.next().unwrap_or("~").replace("~", &home_path);
+    if args.next().is_some() {
+        return Err(String::from("cd: too many arguments"));
+    }
+    env::set_current_dir(path).map_err(|err| format!("cd: {}", err))?;
+    Ok(())
+}
+
 fn main() {
-    let path_home = env::var("USERPROFILE")
-        .unwrap_or_else(|_| env::var("HOME").expect("no HOME or USERPROFILE env var"));
-    let username = env::var("USERNAME")
-        .unwrap_or_else(|_| env::var("USER").expect("no USERNAME or USER env var"));
-    let conputername = env::var("COMPUTERNAME")
-        .unwrap_or_else(|_| env::var("HOSTNAME").expect("no COMPUTERNAME or HOSTNAME env var"));
+    let home_path = get_env_var("HOME", Some("USERPROFILE"));
+    let username = get_env_var("USER", Some("USERNAME"));
+    let conputername = get_env_var("HOSTNAME", Some("COMPUTERNAME"));
 
     loop {
-        print!(
-            "{}@{}:{}> ",
-            username,
-            conputername,
-            match env::current_dir().unwrap().file_name() {
-                Some(name) => name.to_string_lossy().into_owned(),
-                None => env::current_dir().unwrap().to_string_lossy().into_owned(),
-            }
-        );
+        print!("{}@{}:{}> ", username, conputername, get_current_dir());
         io::stdout().flush().unwrap();
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-        if input.trim().len() == 0 {
+        if io::stdin().read_line(&mut input).unwrap() == 0 {
             continue;
         }
-        let mut commands = input.trim().split('|').peekable();
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        let mut commands = input.split('|').peekable();
         let mut pipe = Stdio::inherit();
         let mut childs = Vec::new();
 
@@ -50,15 +68,10 @@ fn main() {
                     return;
                 }
                 "cd" => {
+                    if let Err(err) = handle_cd(&mut args, &home_path) {
+                        eprintln!("{}", err);
+                    }
                     pipe = Stdio::null();
-                    let path = String::from(args.next().unwrap_or("~")).replace("~", &path_home);
-                    if args.next().is_some() {
-                        eprintln!("cd: too many arguments");
-                        continue;
-                    }
-                    if let Err(err) = env::set_current_dir(path) {
-                        eprintln!("cd: {}", err);
-                    }
                 }
                 program => {
                     let cfg_in = pipe;
@@ -75,14 +88,10 @@ fn main() {
 
                     match child {
                         Ok(mut child) => {
-                            match child.stdout.take() {
-                                Some(stdout) => {
-                                    pipe = Stdio::from(stdout);
-                                }
-                                None => {
-                                    pipe = Stdio::null();
-                                }
-                            }
+                            pipe = child
+                                .stdout
+                                .take()
+                                .map_or_else(|| Stdio::null(), Stdio::from);
                             childs.push(child);
                         }
                         Err(err) => {
